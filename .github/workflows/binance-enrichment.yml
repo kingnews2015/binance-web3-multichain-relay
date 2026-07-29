@@ -1,0 +1,24 @@
+name: Binance Web3 enrichment relay
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Fetch Binance enrichment and push to Worker
+        env:
+          BOT_INGEST_URL: ${{ secrets.BOT_INGEST_URL }}
+          BOT_RELAY_TOKEN: ${{ secrets.BOT_RELAY_TOKEN }}
+        run: node relay/binance-relay.mjs
