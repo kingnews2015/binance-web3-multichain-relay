@@ -117,7 +117,7 @@ export async function runRelay({
       errors,
       networks,
     }),
-  }, { timeoutMs: 45_000, retries: 3 });
+  }, { timeoutMs: 120_000, retries: 1 });
   const summary = {
     runId,
     status: allFailed ? "failed" : errors.length ? "partial" : "ok",
