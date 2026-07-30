@@ -11,14 +11,25 @@ permissions:
 jobs:
   relay:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
+    concurrency:
+      group: binance-enrichment-relay
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Validate relay secrets
+        env:
+          BOT_INGEST_URL: ${{ secrets.BOT_INGEST_URL }}
+          BOT_RELAY_TOKEN: ${{ secrets.BOT_RELAY_TOKEN }}
+        run: |
+          test -n "$BOT_INGEST_URL"
+          test -n "$BOT_RELAY_TOKEN"
       - name: Fetch Binance enrichment and push to Worker
         env:
           BOT_INGEST_URL: ${{ secrets.BOT_INGEST_URL }}
           BOT_RELAY_TOKEN: ${{ secrets.BOT_RELAY_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: node relay/binance-relay.mjs
