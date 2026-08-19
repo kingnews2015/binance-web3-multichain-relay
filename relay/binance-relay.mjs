@@ -11,6 +11,8 @@ const NETWORKS = [
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let lastRelayFingerprint = "";
+let lastRelaySentAt = 0;
 
 export async function jsonFetch(
   url,
@@ -78,6 +80,10 @@ async function leaders(chainId) {
 export async function runRelay({
   ingestUrl = process.env.BOT_INGEST_URL,
   relayToken = process.env.BOT_RELAY_TOKEN,
+  continuous = false,
+  heartbeatMs = 60_000,
+  source = process.env.RELAY_SOURCE ||
+    (process.env.GITHUB_ACTIONS ? "github-actions" : "continuous-relay"),
 } = {}) {
   if (!ingestUrl || !relayToken) throw new Error(
     "BOT_INGEST_URL and BOT_RELAY_TOKEN are required",
@@ -105,28 +111,71 @@ export async function runRelay({
     .map((item) => ({ network: item.network, message: item.error }));
   const allFailed = errors.length === NETWORKS.length;
   const runId = process.env.GITHUB_RUN_ID || crypto.randomUUID();
-  const response = await jsonFetch(ingestUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${relayToken}` },
-    body: JSON.stringify({
-      schemaVersion: 2,
+  const fingerprint = JSON.stringify(networks.map((item) => ({
+    network: item.network,
+    ok: item.ok,
+    smartInflows: item.smartInflows,
+    walletLeaders: item.walletLeaders,
+  })));
+  if (continuous && fingerprint === lastRelayFingerprint &&
+      Date.now() - lastRelaySentAt < heartbeatMs) {
+    return {
       runId,
-      generatedAt: new Date().toISOString(),
-      source: "github-actions",
-      status: allFailed ? "failed" : errors.length ? "partial" : "ok",
-      errors,
-      networks,
-    }),
-  }, { timeoutMs: 120_000, retries: 1 });
+      status: "unchanged",
+      skipped: true,
+      networks: Object.fromEntries(networks.map((item) => [item.network, item.counts])),
+    };
+  }
+  // Deliver each network independently. A large all-chain payload made one
+  // slow D1 ingestion hold the whole relay until GitHub killed the job. This
+  // also means BSC can remain tradable when Solana or Base is rate-limited.
+  const deliveries = await Promise.all(networks.map(async (networkResult) => {
+    const networkErrors = networkResult.ok ? [] : [{
+      network: networkResult.network,
+      message: networkResult.error,
+    }];
+    const status = networkResult.ok ? "ok" : "failed";
+    try {
+      const response = await jsonFetch(ingestUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${relayToken}`,
+        },
+        body: JSON.stringify({
+          schemaVersion: 2,
+          runId: `${runId}:${networkResult.network}`,
+          generatedAt: new Date().toISOString(),
+          source,
+          status,
+          errors: networkErrors,
+          networks: [networkResult],
+        }),
+      }, { timeoutMs: 45_000, retries: 0 });
+      return { network: networkResult.network, ok: true, accepted: response?.accepted || {} };
+    } catch (error) {
+      return {
+        network: networkResult.network,
+        ok: false,
+        error: String(error?.message || error).slice(0, 500),
+      };
+    }
+  }));
+  const deliveryFailures = deliveries.filter((item) => !item.ok);
   const summary = {
     runId,
-    status: allFailed ? "failed" : errors.length ? "partial" : "ok",
+    status: deliveryFailures.length === networks.length ? "failed" :
+      errors.length || deliveryFailures.length ? "partial" : "ok",
     networks: Object.fromEntries(networks.map((item) => [item.network, item.counts])),
-    accepted: response?.accepted || {},
+    accepted: Object.assign({}, ...deliveries.filter((item) => item.ok)
+      .map((item) => item.accepted)),
+    deliveryFailures,
   };
+  lastRelayFingerprint = fingerprint;
+  lastRelaySentAt = Date.now();
   console.log(JSON.stringify(summary));
-  if (allFailed) {
-    throw new Error(`All Binance networks failed after reporting: ${JSON.stringify(errors)}`);
+  if (allFailed || deliveryFailures.length === networks.length) {
+    throw new Error(`Relay unavailable: ${JSON.stringify({ errors, deliveryFailures })}`);
   }
   return summary;
 }
